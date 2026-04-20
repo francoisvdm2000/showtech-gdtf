@@ -7,17 +7,16 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install zip \
     && rm -rf /var/lib/apt/lists/*
 
+# Enable Apache modules (sans MPM car déjà inclus dans l'image)
+RUN a2enmod rewrite headers
+
 # Copy PHP files
 COPY . /var/www/html/
 
 # Set permissions
 RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html
-
-# Create tmp directory
-RUN mkdir -p /var/www/html/tmp && chmod 777 /var/www/html/tmp
-
-# Apache configuration
-RUN a2enmod rewrite headers
+    && chmod -R 755 /var/www/html \
+    && mkdir -p /var/www/html/tmp \
+    && chmod 777 /var/www/html/tmp
 
 EXPOSE 80
