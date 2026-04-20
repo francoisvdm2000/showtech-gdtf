@@ -1,20 +1,21 @@
 <?php
 // ─────────────────────────────────────────────────────────────
 // GDTF Backend — Génération GDTF depuis un PDF de manuel
-// Endpoint : POST /gdtf/generate.php
-//   Body multipart : pdf (file), fixture_name, manufacturer
+// Endpoint : POST /generate.php
+// Body multipart : pdf (file), fixture_name, manufacturer
 // ─────────────────────────────────────────────────────────────
-
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { exit; }
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    exit;
+}
 
 require_once __DIR__ . '/config.php';
 
-// ── Validation ────────────────────────────────────────────────
+// ── Validation ───────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
     echo json_encode(['error' => 'Méthode non autorisée']);
@@ -31,30 +32,30 @@ if (empty($fixtureName) || empty($manufacturer)) {
 }
 
 if (!isset($_FILES['pdf']) || $_FILES['pdf']['error'] !== UPLOAD_ERR_OK) {
+    $uploadError = $_FILES['pdf']['error'] ?? 'fichier absent';
     http_response_code(400);
-    echo json_encode(['error' => 'Fichier PDF manquant ou erreur upload']);
+    echo json_encode(['error' => 'Fichier PDF manquant ou erreur upload', 'upload_error' => $uploadError]);
     exit;
 }
 
 // Vérifie que c'est bien un PDF
-$finfo = finfo_open(FILEINFO_MIME_TYPE);
+$finfo    = finfo_open(FILEINFO_MIME_TYPE);
 $mimeType = finfo_file($finfo, $_FILES['pdf']['tmp_name']);
 finfo_close($finfo);
 
 if ($mimeType !== 'application/pdf') {
     http_response_code(400);
-    echo json_encode(['error' => 'Le fichier doit être un PDF']);
+    echo json_encode(['error' => 'Le fichier doit être un PDF', 'mime_detected' => $mimeType]);
     exit;
 }
 
-// ── Extraction texte du PDF ───────────────────────────────────
+// ── Extraction texte du PDF ──────────────────────────────────
 if (!is_dir(TEMP_DIR)) mkdir(TEMP_DIR, 0755, true);
 
 $pdfPath  = TEMP_DIR . uniqid('pdf_') . '.pdf';
 move_uploaded_file($_FILES['pdf']['tmp_name'], $pdfPath);
 
-// Essaye pdftotext (disponible sur la plupart des hébergements)
-$textPath = $pdfPath . '.txt';
+$textPath  = $pdfPath . '.txt';
 exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath) . " 2>&1", $output, $returnCode);
 
 $pdfText = '';
@@ -77,10 +78,9 @@ if (empty(trim($pdfText))) {
 // Limite le texte à 15000 caractères pour l'API
 $pdfText = mb_substr($pdfText, 0, 15000);
 
-// ── Appel Gemini pour extraire les modes DMX ─────────────────
+// ── Prompt Groq ──────────────────────────────────────────────
 $prompt = <<<PROMPT
 Tu es un expert en éclairage scénique et en format GDTF (General Device Type Format).
-
 Voici le texte extrait du manuel technique de la fixture suivante :
 - Fabricant : {$manufacturer}
 - Modèle : {$fixtureName}
@@ -102,10 +102,8 @@ Règles importantes :
 Structure XML attendue :
 <?xml version="1.0" encoding="UTF-8"?>
 <GDTF DataVersion="1.2">
-  <FixtureType Name="{$fixtureName}" ShortName="" Manufacturer="{$manufacturer}" 
-               Description="" Type="MovingHead" 
-               FixtureTypeID="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
-               Thumbnail="" RefFT="">
+  <FixtureType Name="{$fixtureName}" ShortName="" Manufacturer="{$manufacturer}" Description="" Type="MovingHead"
+    FixtureTypeID="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" Thumbnail="" RefFT="">
     <AttributeDefinitions>
       <ActivationGroups/>
       <Features>
@@ -147,33 +145,39 @@ $groqBody = json_encode([
     'messages'    => [
         [
             'role'    => 'system',
-            'content' => 'Tu es un expert GDTF. Tu génères uniquement du XML GDTF valide, sans aucun texte avant ou après, sans balises markdown.'
+            'content' => 'Tu es un expert GDTF. Tu génères uniquement du XML GDTF valide, sans aucun texte avant ou après, sans balises markdown.',
         ],
         [
             'role'    => 'user',
-            'content' => $prompt
-        ]
-    ]
+            'content' => $prompt,
+        ],
+    ],
 ]);
 
 $ch = curl_init($groqUrl);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, $groqBody);
+curl_setopt($ch, CURLOPT_POST,           true);
+curl_setopt($ch, CURLOPT_POSTFIELDS,     $groqBody);
 curl_setopt($ch, CURLOPT_HTTPHEADER, [
     'Content-Type: application/json',
     'Authorization: Bearer ' . GROQ_API_KEY,
 ]);
-curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+curl_setopt($ch, CURLOPT_TIMEOUT,        90);
 curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
 
 $groqResponse = curl_exec($ch);
+$curlError    = curl_error($ch);
 $httpCode     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
 if ($httpCode !== 200 || !$groqResponse) {
     http_response_code(502);
-    echo json_encode(['error' => 'Erreur API Groq', 'code' => $httpCode, 'detail' => $groqResponse]);
+    echo json_encode([
+        'error'      => 'Erreur API Groq',
+        'code'       => $httpCode,
+        'curl_error' => $curlError,
+        'detail'     => $groqResponse,
+    ]);
     exit;
 }
 
@@ -182,19 +186,19 @@ $xmlContent = $groqData['choices'][0]['message']['content'] ?? '';
 
 if (empty($xmlContent)) {
     http_response_code(502);
-    echo json_encode(['error' => 'Gemini n\'a pas retourné de XML']);
+    echo json_encode(['error' => 'Groq n\'a pas retourné de XML']);
     exit;
 }
 
 // Nettoie le XML (enlève les balises markdown si présentes)
 $xmlContent = preg_replace('/^```xml\s*/m', '', $xmlContent);
-$xmlContent = preg_replace('/^```\s*/m', '', $xmlContent);
+$xmlContent = preg_replace('/^```\s*/m',    '', $xmlContent);
 $xmlContent = trim($xmlContent);
 
-// ── Création du fichier .gdtf (ZIP) ──────────────────────────
+// ── Création du fichier .gdtf (ZIP) ─────────────────────────
 $gdtfPath = TEMP_DIR . uniqid('gdtf_') . '.gdtf';
+$zip      = new ZipArchive();
 
-$zip = new ZipArchive();
 if ($zip->open($gdtfPath, ZipArchive::CREATE) !== true) {
     http_response_code(500);
     echo json_encode(['error' => 'Impossible de créer le fichier GDTF']);
@@ -204,13 +208,14 @@ if ($zip->open($gdtfPath, ZipArchive::CREATE) !== true) {
 $zip->addFromString('description.xml', $xmlContent);
 $zip->close();
 
-// ── Retourne le fichier .gdtf ─────────────────────────────────
+// ── Retourne le .gdtf encodé en base64 dans du JSON ─────────
 $safeName = preg_replace('/[^a-zA-Z0-9_\-]/', '_', $manufacturer . '_' . $fixtureName);
 $filename = $safeName . '.gdtf';
-
-header('Content-Type: application/zip');
-header('Content-Disposition: attachment; filename="' . $filename . '"');
-header('Content-Length: ' . filesize($gdtfPath));
-
-readfile($gdtfPath);
+$gdtfData = base64_encode(file_get_contents($gdtfPath));
 unlink($gdtfPath);
+
+echo json_encode([
+    'success'     => true,
+    'filename'    => $filename,
+    'gdtf_base64' => $gdtfData,
+]);

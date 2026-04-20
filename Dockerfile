@@ -8,11 +8,16 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install zip \
     && rm -rf /var/lib/apt/lists/*
 
+# PHP config : uploads 20M, timeout 120s, mémoire 256M
+RUN echo "upload_max_filesize=20M\npost_max_size=20M\nmax_execution_time=120\nmemory_limit=256M" \
+    > /usr/local/etc/php/conf.d/custom.ini
+
 # Nginx config
 COPY nginx.conf /etc/nginx/sites-available/default
 
 # Copy PHP files
 COPY . /var/www/html/
+
 RUN mkdir -p /var/www/html/tmp \
     && chmod 777 /var/www/html/tmp \
     && chown -R www-data:www-data /var/www/html
